@@ -403,7 +403,7 @@ QR Algorithm for Eigenvalue Computation/
 - The **basic QR algorithm** converges linearly and is primarily of educational value.
 - The **shifted QR algorithm** with Wilkinson shifts achieves cubic convergence for symmetric matrices.
 - **Deflation** reduces problem size as eigenvalues converge, improving efficiency.
-- In practice, production implementations (LAPACK, R's `eigen()`) first reduce the matrix to **Hessenberg form** ($O(n^3)$) then apply shifted QR on the Hessenberg matrix ($O(n^2)$ per step).
+- In practice, production implementations (LAPACK, R's `eigen()`) first reduce the matrix to **Hessenberg form** $O(n^3)$ then apply shifted QR on the Hessenberg matrix ($O(n^2)$ per step).
 - This R implementation uses **Gram-Schmidt** for QR decomposition, which is numerically less stable than Householder reflections used in LAPACK.
 
 ---
