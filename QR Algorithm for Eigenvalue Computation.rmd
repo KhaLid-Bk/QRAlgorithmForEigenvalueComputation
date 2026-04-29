@@ -1,0 +1,457 @@
+---
+title: "QR Algorithm for Eigenvalue Computation"
+author: "KHALID BOUKHIT"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+    code_folding: show
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      fig.width = 9, fig.height = 6)
+library(ggplot2)
+library(microbenchmark)
+
+
+set.seed(42)
+```
+
+# Introduction
+
+The **QR Algorithm** is the workhorse of numerical linear algebra for computing **all** eigenvalues of a matrix. It is the algorithm behind R's `eigen()`, MATLAB's `eig()`, and LAPACK's `xGEEV`/`xSYEV` routines. Unlike power/inverse iteration (which find one eigenvalue at a time), the QR algorithm simultaneously converges the matrix to a form from which all eigenvalues can be read off.
+
+# Mathematical Background
+
+## QR Decomposition
+
+Any matrix $A \in \mathbb{R}^{n \times n}$ can be factored as $A = QR$ where $Q$ is orthogonal ($Q^\top Q = I$) and $R$ is upper triangular.
+
+## Basic QR Iteration
+
+Starting with $A_0 = A$:
+
+$$A_k = Q_k R_k \quad \text{(QR decomposition)}$$
+$$A_{k+1} = R_k Q_k \quad \text{(reverse multiply)}$$
+
+
+$A_{k+1} = R_k Q_k = Q_k^\top (Q_k R_k) Q_k = Q_k^\top A_k Q_k$, so all $A_k$ are **similar** (same eigenvalues). The sequence $A_k$ converges to an upper-triangular (or quasi-triangular) matrix whose diagonal entries are the eigenvalues.
+
+## Why It Converges
+
+The QR algorithm is equivalent to **simultaneous iteration** (applying power iteration to all $n$ basis vectors at once with re-orthogonalisation). The convergence of $A_k$ to upper-triangular form is governed by the ratios $|\lambda_{i+1}/\lambda_i|$. Sub-diagonal elements $a_{i+1,i}^{(k)}$ converge to zero at rate $|\lambda_{i+1}/\lambda_i|^k$.
+
+## Shifted QR Algorithm
+
+Convergence is dramatically accelerated by introducing **shifts**. At each step:
+$$A_k - \sigma_k I = Q_k R_k$$
+$$A_{k+1} = R_k Q_k + \sigma_k I$$
+
+The shift $\sigma_k$ is chosen to approximate an eigenvalue, driving relevant sub-diagonal elements to zero rapidly.
+
+### Wilkinson Shift
+
+The **Wilkinson shift** is the eigenvalue of the trailing $2 \times 2$ sub-matrix:
+
+$$B = \begin{pmatrix} a_{n-1,n-1} & a_{n-1,n} \\ a_{n,n-1} & a_{n,n} \end{pmatrix}$$
+
+that is closest to $a_{n,n}$. The eigenvalues of $B$ are:
+
+$$\mu = \frac{\text{tr}(B)}{2} \pm \sqrt{\left(\frac{\text{tr}(B)}{2}\right)^2 - \det(B)}$$
+
+The Wilkinson shift gives **globally convergent** cubic convergence for symmetric matrices.
+
+## Deflation
+
+When $|a_{m,m-1}^{(k)}| < \epsilon$, we accept $a_{m,m}^{(k)}$ as a converged eigenvalue and **deflate**: reduce the working matrix to the leading $(m-1) \times (m-1)$ block.
+
+## Complexity
+
+For an $n \times n$ matrix:
+
+- Without preliminary reduction: $O(n^3)$ per QR step → total $O(n^4)$ 
+- With Hessenberg reduction (standard practice): $O(n^2)$ per QR step → total $O(n^3)$
+- With shifts: convergence in $O(n)$ total iterations → total $O(n^3)$
+
+
+
+# Algorithm Pseudocode
+
+## Basic QR
+
+```
+QR_BASIC(A, tol, max_iter):
+    A_k ← A
+    for k = 1, 2, …, max_iter:
+        Q, R ← QR(A_k)
+        A_k ← R · Q
+        if sum(|lower-triangular(A_k)|) < tol:
+            RETURN diag(A_k)   # eigenvalues
+    RETURN diag(A_k)
+```
+
+## Shifted QR with Deflation
+
+```
+QR_SHIFTED(A, tol, max_iter):
+    A_k ← A;  m ← n
+    while m > 1:
+        σ ← wilkinson_shift(A_k[m-1:m, m-1:m])
+        Q, R ← QR(A_k[1:m, 1:m] − σ I)
+        A_k[1:m, 1:m] ← R · Q + σ I
+        if |A_k[m, m-1]| < tol:
+            eigenvalue[m] ← A_k[m, m]
+            m ← m − 1         # deflate
+    eigenvalue[1] ← A_k[1,1]
+    RETURN eigenvalues
+```
+
+# R Implementation
+
+```{r source-impl}
+###############################################################################
+# QR Algorithm — Pure R Implementation
+# Computes ALL eigenvalues of a square matrix via iterative QR decomposition.
+###############################################################################
+
+#' QR Decomposition (Gram-Schmidt)
+#'
+#' Pure R QR decomposition. Returns Q (orthogonal) and R (upper triangular).
+#' @param A Numeric matrix.
+#' @return List with Q and R.
+qrdecomp <- function(A) {
+  n <- nrow(A)
+  m <- ncol(A)
+  Q <- matrix(0, n, m)
+  R <- matrix(0, m, m)
+
+  for (j in seq_len(m)) {
+    v <- A[, j]
+    if (j > 1) {
+      for (i in 1:(j - 1)) {
+        R[i, j] <- sum(Q[, i] * A[, j])
+        v <- v - R[i, j] * Q[, i]
+      }
+    }
+    R[j, j] <- sqrt(sum(v^2))
+    if (R[j, j] > 1e-14) {
+      Q[, j] <- v / R[j, j]
+    } else {
+      Q[, j] <- v
+    }
+  }
+  list(Q = Q, R = R)
+}
+
+#' Basic QR Algorithm (no shifts)
+#'
+#' @param A       Square numeric matrix (should be real).
+#' @param tol     Convergence tolerance (sub-diagonal element magnitude).
+#' @param max_iter Maximum iterations.
+#' @return List with: values (eigenvalues), iterations, converged, history.
+qralgorithmbasic <- function(A, tol = 1e-10, max_iter = 500) {
+  n <- nrow(A)
+  Ak <- A
+  history <- list()
+
+  for (k in seq_len(max_iter)) {
+    decomp <- qrdecomp(Ak)
+    Ak <- decomp$R %*% decomp$Q
+    off_diag <- sum(abs(Ak[lower.tri(Ak)]))
+    history[[k]] <- list(eigenvalues = diag(Ak), off_diag = off_diag)
+
+    if (off_diag < tol) {
+      return(list(
+        values     = diag(Ak),
+        matrix     = Ak,
+        iterations = k,
+        converged  = TRUE,
+        history    = history
+      ))
+    }
+  }
+  list(
+    values     = diag(Ak),
+    matrix     = Ak,
+    iterations = max_iter,
+    converged  = FALSE,
+    history    = history
+  )
+}
+
+#' QR Algorithm with Wilkinson Shift
+#'
+#' Uses the Wilkinson shift (eigenvalue of trailing 2×2 sub-matrix closest
+#' to a_{nn}) to accelerate convergence.
+#' @param A       Square symmetric numeric matrix.
+#' @param tol     Convergence tolerance.
+#' @param max_iter Maximum iterations.
+#' @return List with: values, iterations, converged, history.
+qralgorithmshifted <- function(A, tol = 1e-10, max_iter = 1000) {
+  n <- nrow(A)
+  Ak <- A
+  eigenvalues <- numeric(n)
+  m <- n
+  total_iter <- 0
+  history <- list()
+
+  while (m > 1) {
+    for (k in seq_len(max_iter)) {
+      total_iter <- total_iter + 1
+      # Wilkinson shift from trailing 2×2 block
+      a <- Ak[m - 1, m - 1]
+      b <- Ak[m - 1, m]
+      c <- Ak[m, m - 1]
+      d <- Ak[m, m]
+      tr <- a + d
+      det_val <- a * d - b * c
+      disc <- sqrt(max(tr^2 / 4 - det_val, 0))
+      mu1 <- tr / 2 + disc
+      mu2 <- tr / 2 - disc
+      sigma <- ifelse(abs(mu1 - d) < abs(mu2 - d), mu1, mu2)
+
+      # Shifted QR step
+      decomp <- qrdecomp(Ak[1:m, 1:m] - sigma * diag(m))
+      Ak[1:m, 1:m] <- decomp$R %*% decomp$Q + sigma * diag(m)
+
+      history[[total_iter]] <- list(
+        eigenvalues = diag(Ak[1:m, 1:m]),
+        sub_diag    = abs(Ak[m, m - 1])
+      )
+
+      if (abs(Ak[m, m - 1]) < tol) {
+        eigenvalues[m] <- Ak[m, m]
+        m <- m - 1
+        break
+      }
+    }
+  }
+  if (m == 1) eigenvalues[1] <- Ak[1, 1]
+
+  list(
+    values     = sort(eigenvalues, decreasing = TRUE),
+    iterations = total_iter,
+    converged  = TRUE,
+    history    = history
+  )
+}
+```
+
+
+## Custom QR Decomposition
+
+```{r show-qr-decomp, eval=FALSE}
+qrdecomp <- function(A) {
+  n <- nrow(A); m <- ncol(A)
+  Q <- matrix(0, n, m); R <- matrix(0, m, m)
+  for (j in seq_len(m)) {
+    v <- A[, j]
+    if (j > 1) {
+      for (i in 1:(j-1)) {
+        R[i, j] <- sum(Q[, i] * A[, j])
+        v <- v - R[i, j] * Q[, i]
+      }
+    }
+    R[j, j] <- sqrt(sum(v^2))
+    Q[, j] <- if (R[j, j] > 1e-14) v / R[j, j] else v
+  }
+  list(Q = Q, R = R)
+}
+```
+
+# Testing with Sample Matrices
+
+## Example 1: 3×3 Symmetric — Basic QR
+
+```{r test-basic-3x3}
+A1 <- matrix(c(4, 1, 2,
+               1, 3, 0,
+               2, 0, 5), nrow = 3, byrow = TRUE)
+cat("Matrix A1:\n"); print(A1)
+
+res1basic <- qralgorithmbasic(A1)
+cat("\nEigenvalues (basic QR):", sort(res1basic$values, decreasing = TRUE))
+cat("\nIterations:", res1basic$iterations)
+cat("\nBuilt-in eigen():", sort(eigen(A1)$values, decreasing = TRUE))
+```
+
+## Example 2: 3×3 Symmetric — Shifted QR
+
+```{r test-shifted-3x3}
+res1shifted <- qralgorithmshifted(A1)
+cat("Eigenvalues (shifted QR):", res1shifted$values)
+cat("\nIterations:", res1shifted$iterations)
+```
+
+## Example 3: 5×5 Random Symmetric
+
+```{r test-5x5}
+set.seed(42)
+A3 <- matrix(rnorm(25), 5, 5)
+A3 <- A3 + t(A3)
+
+res3basic   <- qralgorithmbasic(A3)
+res3shifted <- qralgorithmshifted(A3)
+
+cat("Basic  QR eigenvalues:", round(sort(res3basic$values, decreasing = TRUE), 6))
+cat("\nShifted QR eigenvalues:", round(res3shifted$values, 6))
+cat("\nBuilt-in eigen():", round(sort(eigen(A3)$values, decreasing = TRUE), 6))
+cat("\n\nBasic iterations:", res3basic$iterations)
+cat("\nShifted iterations:", res3shifted$iterations)
+```
+
+# Comparison with Built-in `eigen()`
+
+```{r comparison}
+evalstrue <- sort(eigen(A3)$values, decreasing = TRUE)
+evalsbasic <- sort(res3basic$values, decreasing = TRUE)
+evalsshifted <- sort(res3shifted$values, decreasing = TRUE)
+
+comparison <- data.frame(
+  Index = 1:5,
+  BuiltIn = round(evalstrue, 10),
+  BasicQR = round(evalsbasic, 10),
+  ShiftedQR = round(evalsshifted, 10),
+  Error_Basic = abs(evalsbasic - evalstrue),
+  Error_Shifted = abs(evalsshifted - evalstrue)
+)
+knitr::kable(comparison, digits = 12, caption = "QR Algorithm vs eigen()")
+```
+
+# Convergence Plot — Sub-Diagonal Decay
+
+```{r convergence-sub-diag}
+# Track off-diagonal norm for basic QR on A1
+resconv <- qralgorithmbasic(A1, tol = 1e-15, max_iter = 200)
+offdiags <- sapply(resconv$history, function(h) h$off_diag)
+
+dfoff <- data.frame(Iteration = seq_along(offdiags), OffDiag = offdiags)
+dfoff <- dfoff[dfoff$OffDiag > 0, ]
+
+ggplot(dfoff, aes(x = Iteration, y = OffDiag)) +
+  geom_line(colour = "#2c3e50", linewidth = 0.8) +
+  scale_y_log10() +
+  labs(title = "QR Algorithm: Sub-diagonal Norm Decay",
+       x = "Iteration", y = "|Lower-triangular elements| (log scale)") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+# Eigenvalue Trajectory Plot
+
+```{r eigenvalue-trajectory}
+# Track diagonal elements (eigenvalue estimates) across iterations
+ndiag <- ncol(A1)
+iters <- length(resconv$history)
+eigtraj <- matrix(NA, iters, ndiag)
+for (i in seq_len(iters)) {
+  eigtraj[i, ] <- sort(resconv$history[[i]]$eigenvalues, decreasing = TRUE)
+}
+
+dftraj <- data.frame(
+  Iteration = rep(1:iters, ndiag),
+  Value = as.numeric(eigtraj),
+  Eigenvalue = factor(rep(paste0("λ", 1:ndiag), each = iters))
+)
+
+trueevals <- sort(eigen(A1)$values, decreasing = TRUE)
+dftrue <- data.frame(
+  Eigenvalue = paste0("λ", 1:ndiag),
+  TrueValue = trueevals
+)
+
+ggplot(dftraj, aes(x = Iteration, y = Value, colour = Eigenvalue)) +
+  geom_line(linewidth = 0.7) +
+  geom_hline(data = dftrue, aes(yintercept = TrueValue),
+             linetype = "dashed", alpha = 0.5) +
+  labs(title = "Eigenvalue Estimates During QR Iteration",
+       x = "Iteration", y = "Diagonal Element Value") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+# Basic vs Shifted Iteration Count
+
+```{r basic-vs-shifted}
+sizes <- c(4, 6, 8, 10, 15, 20)
+itercomparison <- data.frame(Size = integer(), Method = character(),
+                              Iterations = integer())
+for (n in sizes) {
+  set.seed(42)
+  M <- matrix(rnorm(n * n), n, n)
+  M <- M + t(M)
+
+  r_basic <- qralgorithmbasic(M, tol = 1e-10, max_iter = 2000)
+  r_shift <- qralgorithmshifted(M, tol = 1e-10, max_iter = 2000)
+
+  itercomparison <- rbind(itercomparison,
+    data.frame(Size = c(n, n),
+               Method = c("Basic QR", "Shifted QR"),
+               Iterations = c(r_basic$iterations, r_shift$iterations)))
+}
+
+ggplot(itercomparison, aes(x = Size, y = Iterations, fill = Method)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Iterations to Convergence: Basic vs Shifted QR",
+       x = "Matrix Size", y = "Iterations") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+# Runtime Benchmarks
+
+```{r benchmarks}
+sizes <- c(10, 25, 50, 75, 100)
+benchresults <- data.frame(Size = integer(), Method = character(),
+                            MedianTime_ms = numeric())
+
+for (n in sizes) {
+  set.seed(42)
+  M <- matrix(rnorm(n * n), n, n)
+  M <- M + t(M)
+
+  bm <- microbenchmark(
+    BasicQR      = qralgorithmbasic(M, tol = 1e-8),
+    ShiftedQR    = qralgorithmshifted(M, tol = 1e-8),
+    BuiltinEigen = eigen(M),
+    times = 5
+  )
+  sm <- summary(bm)
+  benchresults <- rbind(benchresults, data.frame(
+    Size = rep(n, 3),
+    Method = c("Basic QR", "Shifted QR", "Built-in eigen()"),
+    MedianTime_ms = sm$median / 1e6
+  ))
+}
+
+knitr::kable(benchresults, digits = 3, caption = "Median Runtime (ms)")
+```
+
+```{r benchmark-plot}
+ggplot(benchresults, aes(x = Size, y = MedianTime_ms, colour = Method)) +
+  geom_line(linewidth = 0.8) +
+  geom_point(size = 2.5) +
+  scale_y_log10() +
+  labs(title = "Runtime: Basic QR vs Shifted QR vs eigen()",
+       x = "Matrix Size (n)", y = "Median Time (ms, log scale)") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+# Summary
+
+| Property | Basic QR | Shifted QR |
+|---|---|---|
+| **Target** | All eigenvalues | All eigenvalues |
+| **Convergence** | Linear ($|\lambda_{i+1}/\lambda_i|^k$) | Cubic (Wilkinson shift, symmetric) |
+| **Per-step cost** | $O(n^3)$ | $O(n^3)$ (without Hessenberg reduction) |
+| **Total cost** | $O(n^4)$ typical | $O(n^3)$ typical |
+| **Finds eigenvectors** | Via accumulated $Q$ products | Via accumulated $Q$ products |
+| **Used in practice** | No | Yes (basis of LAPACK routines) |
